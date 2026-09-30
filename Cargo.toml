@@ -1,0 +1,69 @@
+[package]
+name = "zenless-installer"
+version = "0.1.0"
+edition = "2024"
+description = "Zenless Setup - installer and uninstaller for the Zenless Suite"
+license = "MIT"
+repository = "https://github.com/zenless-inc/zenless-installer"
+homepage = "https://zenless-suite.vercel.app"
+default-run = "ZenlessSetup"
+
+[[bin]]
+name = "ZenlessSetup"
+path = "src/main.rs"
+
+[workspace]
+members = ["xtask"]
+
+[dependencies]
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow"] }
+egui-phosphor = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+rfd = "0.17"
+# Online installs: HTTPS through SChannel (no C code), blocking client on a worker thread.
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "blocking", "http2", "charset", "system-proxy"] }
+# Payload format (raw deflate + SHA-256) and the Chrome extension zip.
+miniz_oxide = "0.8"
+sha2 = "0.10"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+mslnk = "0.1"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+embed-resource = "3"
+miniz_oxide = "0.8"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "abort"
+
+# build.rs compresses the embedded payload (tens of MB). Build scripts are
+# normally compiled without optimisation, so optimise just the hot crates.
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.adler2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.release.package.miniz_oxide]
+opt-level = 3
+[profile.release.package.adler2]
+opt-level = 3
+[profile.release.package.sha2]
+opt-level = 3

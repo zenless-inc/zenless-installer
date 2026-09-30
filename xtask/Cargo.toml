@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Build automation for Zenless Setup (`cargo xtask dist`)"
+
+[dependencies]
+zip = { version = "8", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
+serde_json = "1"

@@ -1,0 +1,52 @@
+name: Release
+
+# On a version tag: check out the app and extension repos next to this one,
+# build the offline installer with `cargo xtask dist` and attach it to the release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  dist:
+    runs-on: windows-latest
+    steps:
+      - name: Check out zenless-installer
+        uses: actions/checkout@v4
+        with:
+          path: zenless-installer
+      - name: Check out zenless-download-manager
+        uses: actions/checkout@v4
+        with:
+          repository: zenless-inc/zenless-download-manager
+          path: zenless-download-manager
+      - name: Check out zenless-torrent-client
+        uses: actions/checkout@v4
+        with:
+          repository: zenless-inc/zenless-torrent-client
+          path: zenless-torrent-client
+      - name: Check out zenless-chrome-extension
+        uses: actions/checkout@v4
+        with:
+          repository: zenless-inc/zenless-chrome-extension
+          path: zenless-chrome-extension
+      - name: Check out zenless-firefox-extension
+        uses: actions/checkout@v4
+        with:
+          repository: zenless-inc/zenless-firefox-extension
+          path: zenless-firefox-extension
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the offline installer
+        working-directory: zenless-installer
+        run: cargo xtask dist
+
+      - name: Upload to the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            zenless-installer/dist/ZenlessSetup.exe
+            zenless-installer/dist/ZenlessSetup.exe.sha256

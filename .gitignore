@@ -1,0 +1,6 @@
+/target
+/dist
+/payload/*
+!/payload/README.md
+*.old
+*.log
