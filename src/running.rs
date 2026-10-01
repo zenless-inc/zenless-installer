@@ -96,7 +96,8 @@ mod tests {
     fn quit_request_shape() {
         let req = build_request("POST", "/quit", 6812);
         assert!(req.starts_with("POST /quit HTTP/1.1\r\n"));
-        assert!(req.contains("\r\nX-Zenless-Client: zenless-installer/0.1.0\r\n"));
+        assert_eq!(CLIENT, format!("zenless-installer/{}", env!("CARGO_PKG_VERSION")));
+        assert!(req.contains(&format!("\r\nX-Zenless-Client: {CLIENT}\r\n")));
         assert!(req.contains("Host: 127.0.0.1:6812"));
         assert!(!req.to_ascii_lowercase().contains("origin:"));
         assert!(req.ends_with("\r\n\r\n{}"));

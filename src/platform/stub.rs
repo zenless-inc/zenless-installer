@@ -61,6 +61,15 @@ pub fn spawn_hidden_cmd(_command: &str) -> io::Result<()> {
     Err(unsupported())
 }
 
+pub fn reveal_in_explorer(_path: &Path) -> io::Result<()> {
+    Err(unsupported())
+}
+
+/// There is no Windows Task Scheduler here, so there is never a task to delete.
+pub fn delete_scheduled_task(_name: &str) -> io::Result<bool> {
+    Ok(false)
+}
+
 pub fn free_space(_path: &Path) -> Option<u64> {
     None
 }

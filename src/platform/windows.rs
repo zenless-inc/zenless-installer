@@ -131,26 +131,34 @@ pub fn create_shortcut(lnk: &Path, target: &Path, args: Option<&str>, descriptio
 // ---------------------------------------------------------------------------
 
 pub fn detect_browsers() -> Vec<Browser> {
-    BrowserKind::ALL
-        .iter()
-        .filter_map(|&kind| find_browser(kind).map(|exe| Browser { kind, exe }))
-        .collect()
+    let mut found: Vec<Browser> = Vec::new();
+    for kind in BrowserKind::ALL {
+        if let Some(exe) = find_browser(kind)
+            && !found.iter().any(|b| crate::install::paths_equal(&b.exe, &exe))
+        {
+            found.push(Browser { kind, exe });
+        }
+    }
+    found
 }
 
 fn find_browser(kind: BrowserKind) -> Option<PathBuf> {
-    let app_paths = format!(r"Software\Microsoft\Windows\CurrentVersion\App Paths\{}", kind.exe_name());
-    let roots = [
-        (HKEY_CURRENT_USER, 0),
-        (HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY),
-        (HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY),
-    ];
-    for (root, flags) in roots {
-        if let Ok(key) = RegKey::predef(root).open_subkey_with_flags(&app_paths, KEY_READ | flags)
-            && let Ok(value) = key.get_value::<String, _>("")
-        {
-            let p = PathBuf::from(value.trim().trim_matches('"'));
-            if p.is_file() {
-                return Some(p);
+    let accept = |p: &Path| p.is_file() && kind.owns(p);
+    if let Some(name) = kind.app_paths_name() {
+        let app_paths = format!(r"Software\Microsoft\Windows\CurrentVersion\App Paths\{name}");
+        let roots = [
+            (HKEY_CURRENT_USER, 0),
+            (HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY),
+            (HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY),
+        ];
+        for (root, flags) in roots {
+            if let Ok(key) = RegKey::predef(root).open_subkey_with_flags(&app_paths, KEY_READ | flags)
+                && let Ok(value) = key.get_value::<String, _>("")
+            {
+                let p = PathBuf::from(value.trim().trim_matches('"'));
+                if accept(&p) {
+                    return Some(p);
+                }
             }
         }
     }
@@ -161,7 +169,7 @@ fn find_browser(kind: BrowserKind) -> Option<PathBuf> {
     for base in &bases {
         for rel in kind.known_paths() {
             let p = base.join(rel);
-            if p.is_file() {
+            if accept(&p) {
                 return Some(p);
             }
         }
@@ -196,14 +204,63 @@ pub fn shell_open(target: &OsStr) -> io::Result<()> {
     if h as usize > 32 { Ok(()) } else { Err(io::Error::other(format!("ShellExecute failed ({})", h as usize))) }
 }
 
+/// `%SystemRoot%\<rel>`, falling back to the bare name (resolved through PATH).
+fn system_exe(rel: &str) -> PathBuf {
+    std::env::var_os("SystemRoot")
+        .map(|r| PathBuf::from(r).join(rel))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from(Path::new(rel).file_name().unwrap_or(OsStr::new(rel))))
+}
+
+/// Opens an Explorer window on the parent folder with `path` selected
+/// (`explorer.exe /select,"<path>"`), so it can be dragged somewhere.
+pub fn reveal_in_explorer(path: &Path) -> io::Result<()> {
+    // Explorer parses this argument itself: it must be passed verbatim, with
+    // the path in quotes right after the comma.
+    Command::new(system_exe("explorer.exe"))
+        .raw_arg(super::explorer_select_arg(path))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
+/// Runs `schtasks.exe` without flashing a console window.
+fn schtasks(args: &[&str]) -> io::Result<std::process::Output> {
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    Command::new(system_exe(r"System32\schtasks.exe"))
+        .args(args)
+        .stdin(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+}
+
+/// Deletes the current user's scheduled task `name`
+/// (`schtasks /Delete /TN "<name>" /F`). Returns `Ok(false)` when there is no
+/// such task; existence is checked first so the (localised) "not found"
+/// error text never has to be parsed.
+pub fn delete_scheduled_task(name: &str) -> io::Result<bool> {
+    if !schtasks(&["/Query", "/TN", name])?.status.success() {
+        return Ok(false);
+    }
+    let out = schtasks(&["/Delete", "/TN", name, "/F"])?;
+    if out.status.success() {
+        return Ok(true);
+    }
+    // Gone in the meantime (another Setup removed it): that's fine too.
+    if !schtasks(&["/Query", "/TN", name])?.status.success() {
+        return Ok(false);
+    }
+    let text = String::from_utf8_lossy(&out.stderr);
+    let text = text.trim().trim_start_matches("ERROR:").trim();
+    Err(io::Error::other(if text.is_empty() { format!("schtasks failed ({})", out.status) } else { text.to_owned() }))
+}
+
 /// Runs `cmd.exe /c <command>` hidden and detached (used for self-deletion).
 pub fn spawn_hidden_cmd(command: &str) -> io::Result<()> {
     use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-    let cmd_exe = std::env::var_os("SystemRoot")
-        .map(|r| PathBuf::from(r).join("System32").join("cmd.exe"))
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("cmd.exe"));
-    Command::new(cmd_exe)
+    Command::new(system_exe(r"System32\cmd.exe"))
         .raw_arg(format!("/c {command}"))
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())

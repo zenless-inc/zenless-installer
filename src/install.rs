@@ -176,6 +176,9 @@ pub struct Journal {
     undo: Vec<Undo>,
 }
 
+/// Extra attempts (150 ms apart) to rename a file that is briefly in use.
+const MOVE_RETRIES: u32 = 6;
+
 impl Journal {
     pub fn new(env: Env) -> Self {
         Self { env, undo: Vec::new() }
@@ -198,12 +201,24 @@ impl Journal {
         Ok(())
     }
 
-    /// Renames an existing file/folder to a free `*.old` name.
+    /// Renames an existing file/folder to a free `*.old` name. Retries for a
+    /// moment first: virus scanners and indexers often hold fresh files briefly.
     fn move_aside(&mut self, path: &Path) -> Result<(), String> {
         let backup = free_old_name(path);
-        std::fs::rename(path, &backup).map_err(|e| {
-            format!("could not replace {} (is it open in another program?): {e}", path.display())
-        })?;
+        let mut attempt = 0;
+        loop {
+            match std::fs::rename(path, &backup) {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(_) if attempt < MOVE_RETRIES => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                }
+                Err(e) => {
+                    return Err(format!("could not replace {} (is it open in another program?): {e}", path.display()));
+                }
+            }
+        }
         self.undo.push(Undo::MovedAside { original: path.to_path_buf(), backup });
         Ok(())
     }
@@ -344,14 +359,39 @@ fn remove_missing_ok(path: &Path) -> std::io::Result<()> {
 
 /// `zenless-dm.exe` → `zenless-dm.exe.old` (or `.1.old`, `.2.old`… if taken).
 pub fn free_old_name(path: &Path) -> PathBuf {
+    free_name(path, "old")
+}
+
+/// `<path>.<suffix>` next to `path`, numbered (`.1.<suffix>`…) if taken.
+fn free_name(path: &Path, suffix: &str) -> PathBuf {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut candidate = path.with_file_name(format!("{name}.old"));
+    let mut candidate = path.with_file_name(format!("{name}.{suffix}"));
     let mut i = 1;
     while candidate.exists() {
-        candidate = path.with_file_name(format!("{name}.{i}.old"));
+        candidate = path.with_file_name(format!("{name}.{i}.{suffix}"));
         i += 1;
     }
     candidate
+}
+
+/// Files below `dir`, as paths relative to it (sorted).
+fn files_below(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    fn walk(base: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(base.join(rel))? {
+            let entry = entry?;
+            let child = rel.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                walk(base, &child, out)?;
+            } else {
+                out.push(child);
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(dir, Path::new(""), &mut out).map_err(|e| format!("could not read {}: {e}", dir.display()))?;
+    out.sort();
+    Ok(out)
 }
 
 /// Deletes `*.old` leftovers from a previous run (best effort).
@@ -438,6 +478,63 @@ pub fn extract_extension(data: &[u8], dest: &Path, r: &dyn Reporter) -> Result<u
     Ok(count)
 }
 
+/// Installs the unpacked Chrome extension into `dir`, replacing whatever is
+/// there (any version, including the same one).
+///
+/// Normally the old folder is moved aside and a fresh one is extracted. When
+/// the folder itself can't be renamed (a browser, Explorer or a console has it
+/// open) its files are replaced one by one instead, and files that are no
+/// longer part of the extension are removed. Either way every change is in the
+/// journal, so a rollback restores the previous folder.
+pub fn install_chrome_extension(j: &mut Journal, dir: &Path, data: &[u8], r: &dyn Reporter) -> Result<usize, String> {
+    let busy = match j.fresh_dir(dir) {
+        Ok(()) => return extract_extension(data, dir, r),
+        Err(e) if dir.is_dir() => e,
+        Err(e) => return Err(e),
+    };
+    r.info(&format!("{busy}; replacing the extension files in place instead."));
+    let staging = free_name(dir, "new");
+    j.fresh_dir(&staging)?;
+    let count = extract_extension(data, &staging, r)?;
+    let fresh = files_below(&staging)?;
+    for rel in &fresh {
+        r.check_cancel()?;
+        j.copy_file(&staging.join(rel), &dir.join(rel))?;
+    }
+    for rel in files_below(dir)? {
+        let backup = rel.extension().is_some_and(|e| e.eq_ignore_ascii_case("old"));
+        if !backup && !fresh.contains(&rel) {
+            j.remove_file(&dir.join(&rel))?;
+        }
+    }
+    // Rollback removes it as well; it's only scaffolding.
+    let _ = std::fs::remove_dir_all(&staging);
+    Ok(count)
+}
+
+// ---------------------------------------------------------------------------
+// Firefox add-on
+// ---------------------------------------------------------------------------
+
+/// `true` when an .xpi carries a Mozilla signature (`META-INF/mozilla.rsa` for
+/// PKCS#7 or `META-INF/cose.sig` for COSE signing). Firefox only installs
+/// signed add-ons permanently; unsigned ones can only be loaded temporarily
+/// from `about:debugging`.
+pub fn xpi_names_signed<S: AsRef<str>>(names: &[S]) -> bool {
+    names.iter().any(|n| {
+        let n = n.as_ref().replace('\\', "/");
+        n.eq_ignore_ascii_case("META-INF/mozilla.rsa") || n.eq_ignore_ascii_case("META-INF/cose.sig")
+    })
+}
+
+/// Reads an .xpi and reports whether it is signed (`None`: not a readable zip).
+pub fn xpi_is_signed(path: &Path) -> Option<bool> {
+    let file = std::fs::File::open(path).ok()?;
+    let zip = zip::ZipArchive::new(std::io::BufReader::new(file)).ok()?;
+    let names: Vec<&str> = zip.file_names().collect();
+    Some(xpi_names_signed(&names))
+}
+
 // ---------------------------------------------------------------------------
 // The install run
 // ---------------------------------------------------------------------------
@@ -474,7 +571,8 @@ pub fn run(env: &Env, plan: &InstallPlan, r: &dyn Reporter) -> Result<InstallOut
         Ok(outcome) => {
             r.status("Finishing…");
             journal.commit(r);
-            let warnings = finish_removals(env, plan, &outcome, r);
+            let mut warnings = finish_removals(env, plan, &outcome, r);
+            warnings += crate::legacy::cleanup(env, r);
             r.progress(1.0);
             r.ok("Installation complete.");
             Ok(InstallOutcome { warnings, ..outcome })
@@ -546,27 +644,11 @@ fn execute(env: &Env, plan: &InstallPlan, r: &dyn Reporter, j: &mut Journal) -> 
     r.progress(0.70);
 
     // 4. Write files (0.70 → 0.85) -----------------------------------------
+    // Always replaced, whatever version is installed (repairs damaged files).
     for (i, (c, data)) in blobs.iter().enumerate() {
         r.check_cancel()?;
         r.status(&format!("Installing {}…", c.name()));
-        match c {
-            Component::Dm | Component::Torrent => {
-                let exe = layout.app_exe(*c).expect("app");
-                j.write_file(&exe, data)?;
-                r.ok(&format!("{} → {}", c.name(), rel(&plan.root, &exe)));
-            }
-            Component::Chrome => {
-                let dir = layout.chrome_dir();
-                j.fresh_dir(&dir)?;
-                let n = extract_extension(data, &dir, r)?;
-                r.ok(&format!("Chrome extension ({n} files) → {}", rel(&plan.root, &dir)));
-            }
-            Component::Firefox => {
-                let xpi = layout.firefox_xpi();
-                j.write_file(&xpi, data)?;
-                r.ok(&format!("Firefox extension → {}", rel(&plan.root, &xpi)));
-            }
-        }
+        install_component_files(j, &layout, *c, data, r)?;
         r.progress(0.70 + 0.15 * (i + 1) as f32 / blobs.len().max(1) as f32);
     }
     drop(blobs);
@@ -670,6 +752,28 @@ fn execute(env: &Env, plan: &InstallPlan, r: &dyn Reporter, j: &mut Journal) -> 
     r.progress(0.97);
 
     Ok(InstallOutcome { root: plan.root.clone(), components: final_set, warnings: 0 })
+}
+
+/// Writes one component's files, replacing what is installed (journaled).
+pub fn install_component_files(j: &mut Journal, layout: &Layout, c: Component, data: &[u8], r: &dyn Reporter) -> Result<(), String> {
+    match c {
+        Component::Dm | Component::Torrent => {
+            let exe = layout.app_exe(c).expect("app");
+            j.write_file(&exe, data)?;
+            r.ok(&format!("{} → {}", c.name(), rel(&layout.root, &exe)));
+        }
+        Component::Chrome => {
+            let dir = layout.chrome_dir();
+            let n = install_chrome_extension(j, &dir, data, r)?;
+            r.ok(&format!("Chrome extension ({n} files) → {}", rel(&layout.root, &dir)));
+        }
+        Component::Firefox => {
+            let xpi = layout.firefox_xpi();
+            j.write_file(&xpi, data)?;
+            r.ok(&format!("Firefox extension → {}", rel(&layout.root, &xpi)));
+        }
+    }
+    Ok(())
 }
 
 /// `path` relative to the install folder for log lines (full path if outside).
@@ -907,6 +1011,108 @@ mod tests {
         assert!(extract_extension(&bad, &d2, &Quiet).is_err());
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    #[test]
+    fn xpi_signatures() {
+        assert!(!xpi_names_signed(&["manifest.json", "src/background.js"]));
+        assert!(xpi_names_signed(&["manifest.json", "META-INF/mozilla.rsa", "META-INF/mozilla.sf"]));
+        assert!(xpi_names_signed(&["META-INF/cose.sig", "META-INF/cose.manifest", "manifest.json"]));
+        assert!(xpi_names_signed(&["meta-inf/MOZILLA.RSA"]));
+        assert!(!xpi_names_signed(&["META-INF/manifest.mf", "src/META-INF/mozilla.rsa"]));
+
+        let d = temp_dir("xpi");
+        let unsigned = d.join("unsigned.xpi");
+        std::fs::write(&unsigned, make_zip(&[("manifest.json", b"{}")])).unwrap();
+        assert_eq!(xpi_is_signed(&unsigned), Some(false));
+        let signed = d.join("signed.xpi");
+        std::fs::write(&signed, make_zip(&[("manifest.json", b"{}"), ("META-INF/cose.sig", b"sig")])).unwrap();
+        assert_eq!(xpi_is_signed(&signed), Some(true));
+        assert_eq!(xpi_is_signed(&d.join("missing.xpi")), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Installing over an existing installation replaces every component's
+    /// files, even when the very same version is installed already.
+    #[test]
+    fn reinstall_overwrites_component_files() {
+        let d = temp_dir("reinstall");
+        let layout = Layout::new(d.join("Zenless"));
+        let ext_v1 = make_zip(&[("manifest.json", br#"{"version":"0.2.0"}"#), ("js/a.js", b"v1"), ("js/gone.js", b"x")]);
+        let ext_v2 = make_zip(&[("manifest.json", br#"{"version":"0.2.0"}"#), ("js/a.js", b"v2"), ("popup.html", b"<p>")]);
+        let mut first = Journal::new(Env::with_sandbox(Some(d.join("sb"))));
+        for (c, data) in [(Component::Dm, b"MZ same version".as_slice()), (Component::Firefox, b"PK same".as_slice())] {
+            install_component_files(&mut first, &layout, c, data, &Quiet).unwrap();
+        }
+        install_component_files(&mut first, &layout, Component::Chrome, &ext_v1, &Quiet).unwrap();
+        first.commit(&Quiet);
+        // Damage the installed files a bit.
+        std::fs::write(layout.dm_exe(), b"MZ damaged").unwrap();
+        std::fs::write(layout.chrome_dir().join("js").join("a.js"), b"edited").unwrap();
+
+        let mut again = Journal::new(Env::with_sandbox(Some(d.join("sb"))));
+        install_component_files(&mut again, &layout, Component::Dm, b"MZ same version", &Quiet).unwrap();
+        install_component_files(&mut again, &layout, Component::Firefox, b"PK same", &Quiet).unwrap();
+        install_component_files(&mut again, &layout, Component::Chrome, &ext_v2, &Quiet).unwrap();
+        again.commit(&Quiet);
+        assert_eq!(std::fs::read(layout.dm_exe()).unwrap(), b"MZ same version");
+        assert_eq!(std::fs::read(layout.firefox_xpi()).unwrap(), b"PK same");
+        let chrome = layout.chrome_dir();
+        assert_eq!(std::fs::read(chrome.join("js").join("a.js")).unwrap(), b"v2");
+        assert!(chrome.join("popup.html").is_file());
+        assert!(!chrome.join("js").join("gone.js").exists());
+        assert_eq!(clean_old_files(&layout.root), 0, "no backups left behind");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// When the Chrome folder itself can't be renamed (another program has it
+    /// open) its files are replaced in place, and a rollback restores them.
+    #[cfg(windows)]
+    #[test]
+    fn busy_chrome_folder_is_replaced_in_place() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ_WRITE: u32 = 0x1 | 0x2; // no FILE_SHARE_DELETE
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000; // needed to open a folder
+
+        let d = temp_dir("busy-chrome");
+        let dir = d.join("Chrome");
+        std::fs::create_dir_all(dir.join("js")).unwrap();
+        std::fs::write(dir.join("manifest.json"), b"old").unwrap();
+        std::fs::write(dir.join("js").join("background.js"), b"old").unwrap();
+        std::fs::write(dir.join("js").join("removed.js"), b"old").unwrap();
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&dir)
+            .unwrap();
+        assert!(std::fs::rename(&dir, d.join("renamed")).is_err(), "the folder should be busy");
+
+        let zip = make_zip(&[("manifest.json", b"new"), ("js/background.js", b"new"), ("popup.html", b"<p>")]);
+        let snapshot = |dir: &Path| -> Vec<(PathBuf, Vec<u8>)> {
+            files_below(dir).unwrap().into_iter().map(|rel| (rel.clone(), std::fs::read(dir.join(&rel)).unwrap())).collect()
+        };
+        let before = snapshot(&dir);
+
+        // Rollback brings the old files back.
+        let mut j = Journal::new(Env::with_sandbox(Some(d.join("sb"))));
+        assert_eq!(install_chrome_extension(&mut j, &dir, &zip, &Quiet).unwrap(), 3);
+        assert_eq!(std::fs::read(dir.join("manifest.json")).unwrap(), b"new");
+        j.rollback(&Quiet);
+        assert_eq!(snapshot(&dir), before);
+
+        // Commit keeps exactly the new files.
+        let mut j = Journal::new(Env::with_sandbox(Some(d.join("sb"))));
+        install_chrome_extension(&mut j, &dir, &zip, &Quiet).unwrap();
+        j.commit(&Quiet);
+        let after: Vec<PathBuf> = snapshot(&dir).into_iter().map(|(p, _)| p).collect();
+        let expected: Vec<PathBuf> =
+            vec![Path::new("js").join("background.js"), PathBuf::from("manifest.json"), PathBuf::from("popup.html")];
+        assert_eq!(after, expected);
+        assert_eq!(std::fs::read(dir.join("js").join("background.js")).unwrap(), b"new");
+        assert!(!d.join("Chrome.new").exists());
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

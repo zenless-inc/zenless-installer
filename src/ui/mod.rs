@@ -7,7 +7,7 @@ mod widgets;
 
 use crate::components::{Component, VERSION, WEBSITE};
 use crate::install::{self, InstallOutcome, InstallPlan, Installed, Options};
-use crate::platform::{self, Browser, Env};
+use crate::platform::{self, Browser, BrowserKind, Env};
 use crate::report::{Level, LogLine, SharedReporter, TaskState};
 use crate::shared::kit;
 use crate::shared::theme::{self, Appearance, Palette, Theme, alpha, mix};
@@ -132,6 +132,10 @@ pub struct App {
     launch_dm: bool,
     launch_torrent: bool,
     browsers: Option<Vec<Browser>>,
+    /// Browser whose extensions-page address was just copied (Finish page hint).
+    copied_for: Option<BrowserKind>,
+    /// Whether the installed .xpi is signed by Mozilla (read once).
+    xpi_signed: Option<bool>,
     toast: Option<(String, Instant)>,
 
     un_selected: Vec<Component>,
@@ -180,6 +184,8 @@ impl App {
             launch_dm: true,
             launch_torrent: false,
             browsers: None,
+            copied_for: None,
+            xpi_signed: None,
             toast: None,
             un_selected: installed.as_ref().map(|i| i.components.clone()).unwrap_or_default(),
             un_settings: false,
@@ -195,6 +201,10 @@ impl App {
         }
         if let Some(page) = &launch.demo_page {
             app.apply_demo(page);
+            // Screenshots in another theme without touching the real appearance.json.
+            if let Ok(name) = std::env::var("ZENLESS_INSTALLER_THEME") {
+                app.look.select(ctx, name.trim());
+            }
         }
         app
     }
@@ -413,19 +423,31 @@ impl App {
     }
 
     /// Runs an external program unless in sandbox mode (then it just says so).
-    fn run_external(&mut self, what: &str, exe: &std::path::Path, args: &[&std::ffi::OsStr]) {
-        if self.env.is_sandbox() {
-            self.toast(format!("Sandbox mode: would {what}"));
-        } else if let Err(e) = platform::launch(exe, args) {
-            self.toast(format!("Could not {what}: {e}"));
-        }
+    /// Returns `true` when the program was started.
+    fn run_external(&mut self, what: &str, exe: &std::path::Path, args: &[&std::ffi::OsStr]) -> bool {
+        self.side_effect(what, || platform::launch(exe, args))
     }
 
-    fn open_external(&mut self, what: &str, target: &std::ffi::OsStr) {
+    fn open_external(&mut self, what: &str, target: &std::ffi::OsStr) -> bool {
+        self.side_effect(what, || platform::shell_open(target))
+    }
+
+    /// Opens Explorer with `path` selected (draggable from there).
+    fn reveal(&mut self, what: &str, path: &std::path::Path) -> bool {
+        self.side_effect(what, || platform::reveal_in_explorer(path))
+    }
+
+    fn side_effect(&mut self, what: &str, f: impl FnOnce() -> std::io::Result<()>) -> bool {
         if self.env.is_sandbox() {
             self.toast(format!("Sandbox mode: would {what}"));
-        } else if let Err(e) = platform::shell_open(target) {
-            self.toast(format!("Could not {what}: {e}"));
+            return false;
+        }
+        match f() {
+            Ok(()) => true,
+            Err(e) => {
+                self.toast(format!("Could not {what}: {e}"));
+                false
+            }
         }
     }
 
@@ -459,8 +481,8 @@ impl App {
 
     fn demo_log(&self, failed: bool) {
         let mut s = lock(&self.progress);
+        s.log.push(LogLine { level: Level::Info, text: format!("Zenless Setup {VERSION}") });
         let lines: &[(Level, &str)] = &[
-            (Level::Info, "Zenless Setup 0.1.0"),
             (Level::Info, "Install folder: C:\\Users\\you\\AppData\\Local\\Programs\\Zenless"),
             (Level::Info, "Zenless Download Manager is running; asking it to exit…"),
             (Level::Ok, "Zenless Download Manager has exited."),
@@ -523,9 +545,17 @@ impl App {
                 self.install_result = Some(Err("download failed: HTTP 404 Not Found".into()));
                 self.page = Page::Installing;
             }
-            "7" | "finish" => {
+            "7" | "finish" | "finish-copied" => {
                 self.install_result = Some(Ok(outcome()));
                 self.launch_dm = true;
+                // As after clicking "Open Helium": the address is on the clipboard.
+                self.copied_for = (page == "finish-copied").then_some(BrowserKind::Helium);
+                self.page = Page::Finish;
+            }
+            // Only the Firefox add-on, unsigned (today's builds) or signed by Mozilla.
+            "finish-firefox" | "finish-firefox-signed" => {
+                self.install_result = Some(Ok(InstallOutcome { components: vec![Component::Firefox], ..outcome() }));
+                self.xpi_signed = Some(page.ends_with("-signed"));
                 self.page = Page::Finish;
             }
             "uninstall" => {

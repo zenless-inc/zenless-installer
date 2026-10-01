@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GITHUB_ORG: &str = "zenless-inc";
 pub const WEBSITE: &str = "https://zenless-suite.vercel.app";
+/// The website's step-by-step guide for loading the unpacked extension; the
+/// Finish page opens it in the chosen Chromium browser.
+pub const CHROMIUM_GUIDE: &str = "https://zenless-suite.vercel.app/download#chromium";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Component {
@@ -60,7 +63,7 @@ impl Component {
         match self {
             Self::Dm => "Multi-connection downloads with pause, resume, queues and speed limits.",
             Self::Torrent => "A calm, fast BitTorrent client for magnet links and .torrent files.",
-            Self::Chrome => "Sends downloads to Zenless from Chrome, Edge, Brave, Vivaldi and Opera.",
+            Self::Chrome => "Sends downloads to Zenless from Chrome, Edge, Brave, Vivaldi, Opera and Helium.",
             Self::Firefox => "Sends downloads and magnet links to Zenless from Firefox.",
         }
     }
@@ -251,6 +254,12 @@ mod tests {
         assert_eq!(l.chrome_dir(), Path::new("Z").join("Browser Extensions").join("Chrome"));
         assert_eq!(l.uninstaller(), Path::new("Z").join("uninstall.exe"));
         assert_eq!(l.component_dir(Component::Firefox), None);
+    }
+
+    #[test]
+    fn guide_is_on_the_website() {
+        assert!(CHROMIUM_GUIDE.starts_with(WEBSITE));
+        assert!(CHROMIUM_GUIDE.ends_with("/download#chromium"));
     }
 
     #[test]

@@ -129,6 +129,8 @@ impl Reporter for SharedReporter {
 
 pub struct ConsoleReporter {
     log_file: Option<Mutex<std::fs::File>>,
+    /// Write only to the log file, never to stdout.
+    quiet: bool,
 }
 
 impl ConsoleReporter {
@@ -136,7 +138,12 @@ impl ConsoleReporter {
         let log_file = log_path
             .and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok())
             .map(Mutex::new);
-        Self { log_file }
+        Self { log_file, quiet: false }
+    }
+
+    /// Like [`ConsoleReporter::new`] but prints nothing (log file only).
+    pub fn quiet(log_path: Option<&std::path::Path>) -> Self {
+        Self { quiet: true, ..Self::new(log_path) }
     }
 }
 
@@ -150,7 +157,9 @@ impl Reporter for ConsoleReporter {
         };
         let line = format!("{tag} {text}");
         // Printing can fail when there is no console at all; that's fine.
-        let _ = writeln!(std::io::stdout(), "{line}");
+        if !self.quiet {
+            let _ = writeln!(std::io::stdout(), "{line}");
+        }
         if let Some(f) = &self.log_file
             && let Ok(mut f) = f.lock()
         {

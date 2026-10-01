@@ -24,8 +24,8 @@ mod stub;
 use stub as sys;
 
 pub use sys::{
-    attach_parent_console, detect_browsers, free_space, launch, notify_assoc_changed, shell_open,
-    spawn_hidden_cmd,
+    attach_parent_console, delete_scheduled_task, detect_browsers, free_space, launch, notify_assoc_changed,
+    reveal_in_explorer, shell_open, spawn_hidden_cmd,
 };
 
 pub const SANDBOX_VAR: &str = "ZENLESS_INSTALLER_SANDBOX";
@@ -243,6 +243,7 @@ impl Reg {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrowserKind {
     Chrome,
+    Helium,
     Edge,
     Brave,
     Vivaldi,
@@ -250,13 +251,19 @@ pub enum BrowserKind {
     Firefox,
 }
 
+/// Where Helium installs itself (below `%LOCALAPPDATA%`). Its exe is called
+/// `chrome.exe` too, and it registers itself as the per-user `chrome.exe`
+/// under `App Paths`, so Chrome and Helium are told apart by this folder.
+const HELIUM_DIR: &str = r"imput\Helium\Application";
+
 impl BrowserKind {
-    pub const ALL: [BrowserKind; 6] =
-        [Self::Chrome, Self::Edge, Self::Brave, Self::Vivaldi, Self::Opera, Self::Firefox];
+    pub const ALL: [BrowserKind; 7] =
+        [Self::Chrome, Self::Helium, Self::Edge, Self::Brave, Self::Vivaldi, Self::Opera, Self::Firefox];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Chrome => "Google Chrome",
+            Self::Helium => "Helium",
             Self::Edge => "Microsoft Edge",
             Self::Brave => "Brave",
             Self::Vivaldi => "Vivaldi",
@@ -265,14 +272,25 @@ impl BrowserKind {
         }
     }
 
+    /// Name for buttons ("Open Chrome").
+    pub fn short_name(self) -> &'static str {
+        match self {
+            Self::Chrome => "Chrome",
+            Self::Edge => "Edge",
+            other => other.name(),
+        }
+    }
+
     pub fn is_chromium(self) -> bool {
         !matches!(self, Self::Firefox)
     }
 
-    /// The browser's extensions page.
+    /// The browser's extensions page. Chromium browsers refuse to open these
+    /// internal pages when they are passed on the command line (they show a
+    /// New Tab page instead), so the Finish page copies them for pasting.
     pub fn extensions_url(self) -> &'static str {
         match self {
-            Self::Chrome => "chrome://extensions",
+            Self::Chrome | Self::Helium => "chrome://extensions",
             Self::Edge => "edge://extensions",
             Self::Brave => "brave://extensions",
             Self::Vivaldi => "vivaldi://extensions",
@@ -281,15 +299,17 @@ impl BrowserKind {
         }
     }
 
-    /// Executable name registered under `App Paths`.
-    pub fn exe_name(self) -> &'static str {
+    /// Executable name to look up under `App Paths` (`None`: don't, the name
+    /// is ambiguous).
+    pub fn app_paths_name(self) -> Option<&'static str> {
         match self {
-            Self::Chrome => "chrome.exe",
-            Self::Edge => "msedge.exe",
-            Self::Brave => "brave.exe",
-            Self::Vivaldi => "vivaldi.exe",
-            Self::Opera => "opera.exe",
-            Self::Firefox => "firefox.exe",
+            Self::Chrome => Some("chrome.exe"),
+            Self::Helium => None,
+            Self::Edge => Some("msedge.exe"),
+            Self::Brave => Some("brave.exe"),
+            Self::Vivaldi => Some("vivaldi.exe"),
+            Self::Opera => Some("opera.exe"),
+            Self::Firefox => Some("firefox.exe"),
         }
     }
 
@@ -297,11 +317,24 @@ impl BrowserKind {
     pub fn known_paths(self) -> &'static [&'static str] {
         match self {
             Self::Chrome => &[r"Google\Chrome\Application\chrome.exe"],
+            Self::Helium => &[r"imput\Helium\Application\chrome.exe"],
             Self::Edge => &[r"Microsoft\Edge\Application\msedge.exe"],
             Self::Brave => &[r"BraveSoftware\Brave-Browser\Application\brave.exe"],
             Self::Vivaldi => &[r"Vivaldi\Application\vivaldi.exe"],
             Self::Opera => &[r"Programs\Opera\opera.exe", r"Programs\Opera\launcher.exe", r"Opera\launcher.exe"],
             Self::Firefox => &[r"Mozilla Firefox\firefox.exe"],
+        }
+    }
+
+    /// `false` when `exe` belongs to a different browser that uses the same
+    /// file name (Helium's `chrome.exe` is not Google Chrome).
+    pub fn owns(self, exe: &Path) -> bool {
+        let lower = exe.display().to_string().to_ascii_lowercase().replace('/', "\\");
+        let helium = lower.contains(&format!("\\{}\\", HELIUM_DIR.to_ascii_lowercase()));
+        match self {
+            Self::Chrome => !helium,
+            Self::Helium => helium,
+            _ => true,
         }
     }
 }
@@ -336,6 +369,13 @@ pub fn is_file_locked(path: &Path) -> bool {
 /// Wraps a path in quotes for a command line (`"C:\x y\z.exe"`).
 pub fn quoted(path: &Path) -> String {
     format!("\"{}\"", path.display())
+}
+
+/// The (verbatim) argument for `explorer.exe` that opens the parent folder
+/// with `path` selected: `/select,"C:\…\Chrome"`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn explorer_select_arg(path: &Path) -> String {
+    format!("/select,{}", quoted(path))
 }
 
 #[cfg(test)]
@@ -374,5 +414,23 @@ mod tests {
     #[test]
     fn quoting() {
         assert_eq!(quoted(Path::new(r"C:\a b\c.exe")), "\"C:\\a b\\c.exe\"");
+        assert_eq!(
+            explorer_select_arg(Path::new(r"C:\Users\me\AppData\Local\Programs\Zenless\Browser Extensions\Chrome")),
+            r#"/select,"C:\Users\me\AppData\Local\Programs\Zenless\Browser Extensions\Chrome""#
+        );
+    }
+
+    #[test]
+    fn helium_is_not_chrome() {
+        let helium = Path::new(r"C:\Users\me\AppData\Local\imput\Helium\Application\chrome.exe");
+        let chrome = Path::new(r"C:\Program Files\Google\Chrome\Application\chrome.exe");
+        assert!(BrowserKind::Helium.owns(helium) && !BrowserKind::Chrome.owns(helium));
+        assert!(BrowserKind::Chrome.owns(chrome) && !BrowserKind::Helium.owns(chrome));
+        assert!(BrowserKind::Edge.owns(chrome));
+        // Helium is only found by its folder: its App Paths entry is the generic chrome.exe.
+        assert_eq!(BrowserKind::Helium.app_paths_name(), None);
+        assert_eq!(BrowserKind::Helium.extensions_url(), "chrome://extensions");
+        assert_eq!(BrowserKind::Edge.extensions_url(), "edge://extensions");
+        assert!(BrowserKind::ALL.iter().filter(|k| k.is_chromium()).all(|k| k.extensions_url().ends_with("://extensions")));
     }
 }

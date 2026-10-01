@@ -4,6 +4,8 @@
 //!   Zenless is already installed).
 //! * `--uninstall` opens the uninstaller, `--silent` runs without a window
 //!   (see [`cli::USAGE`]).
+//! * `--update [--background]` (what a pre-release "Zenless Update" task
+//!   runs) removes that task and its leftovers and exits ([`legacy`]).
 //! * `ZENLESS_INSTALLER_SANDBOX=<dir>` redirects every side effect into
 //!   `<dir>` and `HKCU\Software\ZenlessSandbox` (testing).
 //! * `ZENLESS_INSTALLER_PAGE=<page>` opens a wizard page with demo data and
@@ -13,6 +15,7 @@
 mod cli;
 mod components;
 mod install;
+mod legacy;
 mod payload;
 mod payload_format;
 mod platform;
@@ -41,6 +44,10 @@ fn main() {
         return;
     }
     let env = platform::Env::from_env();
+    if parsed.update {
+        // Legacy scheduled task: clean up silently, never open a window.
+        std::process::exit(cli::run_legacy_update(&env, &parsed));
+    }
     if parsed.silent {
         platform::attach_parent_console();
         std::process::exit(cli::run_silent(&env, &parsed));

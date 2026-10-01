@@ -229,6 +229,7 @@ pub fn run(env: &Env, plan: &UninstallPlan, r: &dyn Reporter) -> Result<Uninstal
 
     // Registry & shortcuts that belong to the suite as a whole.
     r.status("Updating Windows…");
+    warnings += crate::legacy::cleanup(env, r);
     let reg = env.reg();
     let mut self_delete = None;
     if full {

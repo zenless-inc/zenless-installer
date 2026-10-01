@@ -15,6 +15,9 @@ USAGE:
   ZenlessSetup.exe --uninstall             open the uninstaller
   ZenlessSetup.exe --silent [OPTIONS]      install without any window
   ZenlessSetup.exe --uninstall --silent [--purge]
+  ZenlessSetup.exe --update [--background] removes what an old pre-release build left behind
+                                           (the \"Zenless Update\" task) and exits; the apps
+                                           now update themselves
 
 OPTIONS (silent install):
   --components dm,torrent,chrome,firefox   what to install (default: everything, or what is
@@ -52,6 +55,10 @@ pub struct Args {
     pub theme: Option<String>,
     pub log: Option<PathBuf>,
     pub purge: bool,
+    /// Legacy `--update [--background]`: what the old "Zenless Update" task
+    /// runs. Only cleans up and exits (see [`run_legacy_update`]).
+    pub update: bool,
+    pub background: bool,
 }
 
 /// Parses the arguments (without the program name).
@@ -94,10 +101,31 @@ where
             "--theme" => out.theme = Some(value("--theme")?),
             "--log" => out.log = Some(PathBuf::from(value("--log")?)),
             "--purge" => out.purge = true,
+            "--update" | "/update" => out.update = true,
+            "--background" => out.background = true,
+            // Accepted for compatibility with the pre-release updater; `--update` ignores it.
+            "--auto" if out.update => {}
             other => return Err(format!("unknown argument {other:?} (try --help)")),
         }
     }
+    if out.background && !out.update {
+        return Err("--background only works together with --update".into());
+    }
+    if out.update && out.uninstall {
+        return Err("--update can't be combined with --uninstall".into());
+    }
     Ok(out)
+}
+
+/// The legacy `--update [--background]` command line. A pre-release build
+/// registered a "Zenless Update" task that runs `uninstall.exe --update
+/// --background`; after upgrading, that `uninstall.exe` is this program. The
+/// apps update themselves now, so all that is left to do is to remove the task
+/// and the pre-release state files — silently, without a window — and exit 0.
+pub fn run_legacy_update(env: &Env, args: &Args) -> i32 {
+    let reporter = ConsoleReporter::quiet(args.log.as_deref());
+    crate::legacy::cleanup(env, &reporter);
+    EXIT_OK
 }
 
 /// Builds the install plan for `--silent`.
@@ -202,6 +230,37 @@ mod tests {
         let a = parse(["--uninstall", "--silent", "--purge"]).unwrap();
         assert!(a.uninstall && a.silent && a.purge);
         assert!(parse(["--uninstall"]).unwrap().uninstall);
+    }
+
+    #[test]
+    fn legacy_update_flags() {
+        let a = parse(["--update", "--background"]).unwrap();
+        assert!(a.update && a.background && !a.silent && !a.uninstall);
+        assert!(parse(["--update"]).unwrap().update);
+        assert!(parse(["/update", "--silent", "--log", "u.log"]).unwrap().update);
+        assert!(parse(["--update", "--auto"]).unwrap().update);
+        assert!(parse(["--background"]).is_err());
+        assert!(parse(["--auto"]).is_err());
+        assert!(parse(["--uninstall", "--update"]).is_err());
+    }
+
+    /// `--update` only cleans up (sandbox-mapped) leftovers and always exits 0.
+    #[test]
+    fn legacy_update_exits_ok() {
+        let sb = std::env::temp_dir().join(format!("zenless-cli-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sb);
+        let env = Env::with_sandbox(Some(sb.clone()));
+        let leftover = env.config_dir().join("update-state.json");
+        std::fs::create_dir_all(leftover.parent().unwrap()).unwrap();
+        std::fs::write(&leftover, b"{}").unwrap();
+        let log = sb.join("update.txt");
+        let args = parse(["--update", "--background", "--log", log.to_str().unwrap()]).unwrap();
+        assert_eq!(run_legacy_update(&env, &args), EXIT_OK);
+        assert!(!leftover.exists());
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("Sandbox mode: would remove the old \"Zenless Update\" scheduled task"));
+        assert!(text.contains("update-state.json"));
+        let _ = std::fs::remove_dir_all(&sb);
     }
 
     #[test]
