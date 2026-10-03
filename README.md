@@ -15,6 +15,11 @@ They are separate apps; Setup only installs them. Everything is **per-user**
 the exe carries an `asInvoker` manifest so Windows does not force a UAC prompt on a
 program called "Setup".
 
+### What's new in 0.2.3
+
+- Bundles Download Manager 0.2.3 and Torrent 0.2.3: both live in the system tray (live tooltip,
+  quick actions, closing the window keeps them running; "Start with Windows" starts in the tray).
+
 ### What's new in 0.2.2
 
 - 34 built-in themes (up from 13), including true-black AMOLED Purple, Mono, Crimson and Emerald,
