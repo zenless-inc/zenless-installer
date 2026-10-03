@@ -15,6 +15,14 @@ They are separate apps; Setup only installs them. Everything is **per-user**
 the exe carries an `asInvoker` manifest so Windows does not force a UAC prompt on a
 program called "Setup".
 
+### What's new in 0.2.2
+
+- 34 built-in themes (up from 13), including true-black AMOLED Purple, Mono, Crimson and Emerald,
+  One Dark, Monokai Pro, Everforest, Kanagawa, Ayu Dark, Night Owl, GitHub Dark, Solarized Dark,
+  Synthwave, Night City, Matrix, Ocean, Sunset, Espresso, Catppuccin Latte, Lavender and Sakura.
+  Midnight, Nord and Solarized Light got small contrast fixes. Bundles Download Manager 0.2.2,
+  Torrent 0.2.2 and the 0.2.2 browser extensions.
+
 ### What's new in 0.2.1
 
 - Bundles Zenless Download Manager 0.2.1: files up to 100 MB use 2 connections by default, so
