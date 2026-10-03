@@ -15,6 +15,11 @@ They are separate apps; Setup only installs them. Everything is **per-user**
 the exe carries an `asInvoker` manifest so Windows does not force a UAC prompt on a
 program called "Setup".
 
+### What's new in 0.2.1
+
+- Bundles Zenless Download Manager 0.2.1: files up to 100 MB use 2 connections by default, so
+  sites don't mistake the download for a bot (adjustable in Settings → General).
+
 ### What's new in 0.2.0
 
 - Bundles Zenless Download Manager 0.2.0, Zenless Torrent 0.2.0 and the 0.2.0 browser
